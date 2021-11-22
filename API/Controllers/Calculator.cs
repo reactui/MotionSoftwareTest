@@ -1,8 +1,10 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Logging;
 using BO.DTO;
 using BO;
-using System.Net;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Caching.Memory;
+using System;
 
 namespace API.Controllers
 {
@@ -11,36 +13,49 @@ namespace API.Controllers
     [Route("api/calculator")]
     public class Calculator : ControllerBase
     {
-        public Calculator()
+        private readonly IConfiguration _config;
+        private readonly TaxConfiguration _taxConfiguration;
+        private readonly IMemoryCache _memoryCache;
+
+        public Calculator(IConfiguration configuration, IOptionsMonitor<TaxConfiguration> optionsMonitor, IMemoryCache memoryCache)
         {
+            _config = configuration;
+            _taxConfiguration = optionsMonitor.CurrentValue;
+            _memoryCache = memoryCache;
         }
 
         // The Controller Action to take a TaxPayer (json format) from the client-side and return
-        // Object result with validation messages, if any, and the result.
-        // If validation fails, result is null
+        // Object result with validation messages, if any, and the result.        
+        // If validation fails, validation error is returned with the Validation Framework (default one in ASP.NET Core)
         [HttpPost]
         [Route("calculate")]
         public IActionResult Calculate([FromBody] TaxPayer taxPayer)
         {
-            TaxCalculator taxCalculator = new TaxCalculator(taxPayer);
-
-            string validationError = taxCalculator.ValidateTaxes();  // validate          
-            Taxes taxes = taxCalculator.CalculateTax();                        
-
-            var result = new
+            // Validation through built-in ASP.NET Core validation framework and model state / data annotation attributes
+            if (!ModelState.IsValid)
             {
-                ValidationMessage = validationError,
-                Data = string.IsNullOrEmpty(validationError) ? taxes : null
-            };
-
-            // Per RFC directives, failed validation is typically marked as BadRequest
-            // https://www.ietf.org/rfc/rfc2616.txt
-            HttpStatusCode statusCode = string.IsNullOrEmpty(validationError) ? HttpStatusCode.OK : HttpStatusCode.BadRequest;
-
-            return new ObjectResult(result)
-            {
-                StatusCode = (int)statusCode
-            };
+                return BadRequest(ModelState);
+            }
+            
+            Taxes taxResult = GetFromCache(taxPayer);
+            return Ok(taxResult);
         }
+
+        private Taxes GetFromCache(TaxPayer taxPayer)
+        {
+            if (!_memoryCache.TryGetValue(taxPayer.GetCustomHash(), out Taxes cachedTaxes))
+            {
+                Taxes taxResult = new TaxCalculator(taxPayer, _taxConfiguration).CalculateTax();
+
+                var cacheEntryOptions = new MemoryCacheEntryOptions().SetSlidingExpiration(TimeSpan.FromHours(6));
+                _memoryCache.Set(taxPayer.GetCustomHash(), taxResult, cacheEntryOptions);
+
+                return taxResult;
+            }
+
+            return cachedTaxes;
+        }
+
+        
     }
 }
